@@ -1,416 +1,1018 @@
 import { StrictMode, useEffect, useMemo, useRef, useState } from 'react'
 import { createRoot } from 'react-dom/client'
+import * as maplibregl from 'maplibre-gl'
+import type { Map as MapLibreMap, MapLayerMouseEvent } from 'maplibre-gl'
+import { MapboxOverlay } from '@deck.gl/mapbox'
+import {
+  ArcLayer,
+  GeoJsonLayer,
+  LineLayer,
+  PathLayer,
+  ScatterplotLayer,
+  TextLayer,
+} from '@deck.gl/layers'
+import { HexagonLayer, ScreenGridLayer } from '@deck.gl/aggregation-layers'
+import type { Layer, PickingInfo } from '@deck.gl/core'
 import {
   ArrowLeft,
-  ArrowRight,
-  BookOpen,
+  ArrowUpRight,
   ChevronRight,
-  CircleHelp,
-  Clock3,
   Compass,
-  Crosshair,
-  Expand,
-  Flag,
-  Layers3,
-  Menu,
-  Minus,
-  Pause,
-  Play,
-  Plus,
-  RotateCcw,
-  Shield,
-  Sparkles,
-  Swords,
-  Users,
+  ExternalLink,
+  Globe2,
+  Info,
+  Layers,
+  LocateFixed,
+  Mail,
+  Search,
   X,
 } from 'lucide-react'
-import { catalog, waterloo } from './data'
-import type { BattleCategory, Position, Unit } from './types'
+import { availableCountries, categories, datasets, datasetsForCountry, layerLabels } from './data'
+import type {
+  AtlasDataset,
+  DatasetCategory,
+  FlowArc,
+  LineSegment,
+  PathMetric,
+  RegionMetric,
+  WeightedPoint,
+} from './types'
+import 'maplibre-gl/dist/maplibre-gl.css'
 import './styles.css'
 
-const categoryMeta: Record<BattleCategory, { icon: typeof Clock3; label: string; description: string }> = {
-  Historical: { icon: Clock3, label: 'Historical', description: 'Battles that shaped our world' },
-  Fantasy: { icon: Shield, label: 'Fantasy', description: 'Clashes from legendary realms' },
-  'Science Fiction': { icon: Sparkles, label: 'Science Fiction', description: 'Conflicts beyond our world' },
+const COUNTRIES_URL = 'https://raw.githubusercontent.com/datasets/geo-countries/master/data/countries.geojson'
+
+interface CapitalRecord {
+  name: string
+  coordinates: [number, number]
 }
 
-function navigate(path: string) {
-  window.history.pushState({}, '', path)
-  window.dispatchEvent(new PopStateEvent('popstate'))
-  window.scrollTo({ top: 0, behavior: 'smooth' })
-}
-
-function Brand({ compact = false }: { compact?: boolean }) {
-  return (
-    <button className="brand" onClick={() => navigate('/')} aria-label="Battle Atlas home">
-      <span className="brand-mark"><Compass size={compact ? 19 : 22} strokeWidth={1.5} /></span>
-      <span>BATTLE <b>ATLAS</b></span>
-    </button>
-  )
-}
-
-function Header({ dark = false }: { dark?: boolean }) {
-  const [open, setOpen] = useState(false)
-  return (
-    <header className={`site-header ${dark ? 'site-header--dark' : ''}`}>
-      <Brand compact />
-      <nav className={open ? 'nav nav--open' : 'nav'} aria-label="Primary navigation">
-        <button onClick={() => navigate('/')}>Explore</button>
-        <button onClick={() => document.getElementById('archive')?.scrollIntoView({ behavior: 'smooth' })}>Archive</button>
-        <button onClick={() => document.getElementById('about')?.scrollIntoView({ behavior: 'smooth' })}>About</button>
-      </nav>
-      <button className="icon-button mobile-menu" onClick={() => setOpen(!open)} aria-label="Toggle menu">
-        {open ? <X size={20} /> : <Menu size={20} />}
-      </button>
-    </header>
-  )
-}
-
-function HomePage() {
-  const [category, setCategory] = useState<BattleCategory | 'All'>('All')
-  const [notice, setNotice] = useState('')
-  const featured = catalog[0]
-  const filtered = category === 'All' ? catalog : catalog.filter((battle) => battle.category === category)
-
-  function selectBattle(available: boolean, title: string) {
-    if (available) navigate('/battles/waterloo')
-    else {
-      setNotice(`${title} is being mapped. Join the expedition soon.`)
-      window.setTimeout(() => setNotice(''), 2800)
-    }
+function extendBounds(bounds: maplibregl.LngLatBounds, coordinates: unknown): void {
+  if (!Array.isArray(coordinates)) return
+  if (typeof coordinates[0] === 'number' && typeof coordinates[1] === 'number') {
+    bounds.extend(coordinates as [number, number])
+    return
   }
+  coordinates.forEach((coordinate) => extendBounds(bounds, coordinate))
+}
 
-  return (
-    <main className="home">
-      <div className="hero">
-        <Header />
-        <div className="hero-cartography" aria-hidden="true">
-          <span className="contour contour-a" />
-          <span className="contour contour-b" />
-          <span className="contour contour-c" />
-          <span className="route-line" />
-          <span className="map-label label-one">RIDGE OF MONT-ST-JEAN</span>
-          <span className="map-label label-two">LA BELLE ALLIANCE</span>
-        </div>
-        <section className="hero-content">
-          <div className="eyebrow"><span /> HISTORY, MAPPED IN MOTION</div>
-          <h1>Every battle<br />has a <em>story.</em></h1>
-          <p>Step onto the field. Follow every movement. Understand the decisions that changed the course of history.</p>
-          <button className="primary-button" onClick={() => navigate('/battles/waterloo')}>
-            Explore the atlas <ArrowRight size={17} />
-          </button>
-          <div className="hero-stat">
-            <strong>01</strong>
-            <span><b>Battle mapped</b><br />New expeditions added regularly</span>
-          </div>
-        </section>
-        <div className="scroll-cue"><span /> SCROLL TO EXPLORE</div>
-      </div>
+function colorFromHex(hex: string, alpha = 230): [number, number, number, number] {
+  const value = hex.replace('#', '')
+  return [
+    Number.parseInt(value.slice(0, 2), 16),
+    Number.parseInt(value.slice(2, 4), 16),
+    Number.parseInt(value.slice(4, 6), 16),
+    alpha,
+  ]
+}
 
-      <section className="intro-section" id="about">
-        <div className="section-kicker">THE ARCHIVE</div>
-        <div className="intro-grid">
-          <h2>Explore conflict<br />across <em>every world.</em></h2>
-          <p>From ancient fields to distant stars, Battle Atlas transforms complex conflicts into clear, immersive stories. Choose a theater to begin.</p>
-        </div>
-        <div className="category-grid">
-          {(Object.entries(categoryMeta) as [BattleCategory, (typeof categoryMeta)[BattleCategory]][]).map(([name, meta], index) => {
-            const Icon = meta.icon
-            return (
-              <button className="category-card" key={name} onClick={() => { setCategory(name); document.getElementById('archive')?.scrollIntoView({ behavior: 'smooth' }) }}>
-                <span className="category-number">0{index + 1}</span>
-                <span className="category-icon"><Icon size={25} strokeWidth={1.4} /></span>
-                <strong>{meta.label}</strong>
-                <small>{meta.description}</small>
-                <ChevronRight className="category-arrow" size={19} />
-              </button>
+function lerpColor(
+  low: [number, number, number, number],
+  high: [number, number, number, number],
+  t: number,
+): [number, number, number, number] {
+  const clamped = Math.min(1, Math.max(0, t))
+  return [
+    Math.round(low[0] + (high[0] - low[0]) * clamped),
+    Math.round(low[1] + (high[1] - low[1]) * clamped),
+    Math.round(low[2] + (high[2] - low[2]) * clamped),
+    Math.round(low[3] + (high[3] - low[3]) * clamped),
+  ]
+}
+
+function formatNumber(value: number) {
+  return value.toLocaleString('en-US')
+}
+
+function formatMetric(value: number) {
+  const abs = Math.abs(value)
+  if (abs >= 1000) return Math.round(value).toLocaleString('en-US')
+  if (abs >= 100) return Math.round(value).toLocaleString('en-US')
+  return value.toFixed(1)
+}
+
+function fitDataset(map: MapLibreMap, dataset: AtlasDataset) {
+  const bounds = new maplibregl.LngLatBounds()
+  dataset.regions.forEach((region) => bounds.extend(region.coordinates))
+  dataset.arcs?.forEach((arc) => {
+    bounds.extend(arc.source)
+    bounds.extend(arc.target)
+  })
+  dataset.paths?.forEach((path) => path.path.forEach((coord) => bounds.extend(coord)))
+  dataset.lines?.forEach((line) => {
+    bounds.extend(line.source)
+    bounds.extend(line.target)
+  })
+  dataset.points?.forEach((point) => bounds.extend(point.coordinates))
+  if (bounds.isEmpty()) return
+  map.fitBounds(bounds, {
+    padding: 110,
+    maxZoom: 4.4,
+    duration: 1100,
+    pitch: dataset.mapLayer === 'polygon' || dataset.mapLayer === 'hexagon' ? 45 : 32,
+    bearing: dataset.mapLayer === 'arc' || dataset.mapLayer === 'line' ? -18 : -8,
+  })
+}
+
+function deckLayersForDataset(
+  dataset: AtlasDataset,
+  selectedRegionId: string | null,
+  onSelectRegion: (region: RegionMetric) => void,
+): Layer[] {
+  const accent = colorFromHex(dataset.accent)
+  const max = Math.max(...dataset.regions.map((region) => Math.abs(region.perCapita)), 1)
+
+  const findRegion = (idOrName: string) =>
+    dataset.regions.find((region) => region.id === idOrName || region.name === idOrName)
+
+  switch (dataset.mapLayer) {
+    case 'hexagon':
+      return [
+        new HexagonLayer<WeightedPoint>({
+          id: `hex-${dataset.id}`,
+          data: dataset.points ?? [],
+          getPosition: (point) => point.coordinates,
+          getColorWeight: (point) => point.weight,
+          getElevationWeight: (point) => point.weight,
+          elevationScale: 1200,
+          extruded: true,
+          radius: 55_000,
+          coverage: 0.82,
+          upperPercentile: 100,
+          colorRange: [
+            [35, 48, 38],
+            [92, 120, 52],
+            [170, 190, 60],
+            [220, 190, 60],
+            [240, 140, 50],
+            [255, 80, 50],
+          ],
+          pickable: true,
+          material: true,
+          onClick: (info: PickingInfo) => {
+            const points = (info.object as { points?: Array<{ source: WeightedPoint }> } | undefined)?.points
+            const region = findRegion(points?.[0]?.source.regionId ?? '')
+            if (region) onSelectRegion(region)
+            return true
+          },
+        }),
+      ]
+
+    case 'screengrid':
+      return [
+        new ScreenGridLayer<WeightedPoint>({
+          id: `grid-${dataset.id}`,
+          data: dataset.points ?? [],
+          getPosition: (point) => point.coordinates,
+          getWeight: (point) => point.weight,
+          cellSizePixels: 18,
+          colorRange: [
+            [20, 40, 55, 40],
+            [40, 100, 140, 120],
+            [60, 170, 210, 180],
+            [120, 220, 255, 220],
+            [220, 250, 255, 255],
+          ],
+          gpuAggregation: true,
+          pickable: true,
+        }),
+        new ScatterplotLayer<RegionMetric>({
+          id: `grid-hubs-${dataset.id}`,
+          data: dataset.regions,
+          pickable: true,
+          getPosition: (region) => region.coordinates,
+          getRadius: 18_000,
+          radiusMinPixels: 4,
+          getFillColor: accent,
+          onClick: (info: PickingInfo<RegionMetric>) => {
+            if (info.object) onSelectRegion(info.object)
+          },
+        }),
+      ]
+
+    case 'arc': {
+      const maxFlow = Math.max(...(dataset.arcs?.map((arc) => arc.value) ?? [1]))
+      return [
+        new ArcLayer<FlowArc>({
+          id: `arc-${dataset.id}`,
+          data: dataset.arcs ?? [],
+          getSourcePosition: (arc) => arc.source,
+          getTargetPosition: (arc) => arc.target,
+          getSourceColor: [255, 120, 70, 220],
+          getTargetColor: [90, 190, 255, 220],
+          getWidth: (arc) => 1 + (arc.value / maxFlow) * 5,
+          pickable: true,
+          greatCircle: true,
+          onClick: (info: PickingInfo<FlowArc>) => {
+            const region = findRegion(info.object?.targetName ?? '')
+            if (region) onSelectRegion(region)
+          },
+        }),
+        new ScatterplotLayer<RegionMetric>({
+          id: `arc-hubs-${dataset.id}`,
+          data: dataset.regions,
+          pickable: true,
+          getPosition: (region) => region.coordinates,
+          getRadius: (region) => 12_000 + (Math.abs(region.perCapita) / max) * 28_000,
+          radiusMinPixels: 4,
+          getFillColor: (region) => {
+            if (selectedRegionId === region.id) return [255, 255, 255, 245]
+            return region.perCapita >= 0 ? accent : colorFromHex('#5aa7ff')
+          },
+          onClick: (info: PickingInfo<RegionMetric>) => {
+            if (info.object) onSelectRegion(info.object)
+          },
+        }),
+      ]
+    }
+
+    case 'polygon':
+      return [
+        new GeoJsonLayer({
+          id: `polygon-${dataset.id}`,
+          data: dataset.polygonUrl,
+          stroked: true,
+          filled: true,
+          extruded: true,
+          wireframe: false,
+          pickable: true,
+          getElevation: (feature: { properties?: Record<string, unknown> }) => {
+            const value = Number(feature.properties?.[dataset.polygonValueKey ?? 'density'] ?? 0)
+            return Math.sqrt(Math.max(value, 0)) * 4_500
+          },
+          getFillColor: (feature: { properties?: Record<string, unknown> }) => {
+            const value = Number(feature.properties?.[dataset.polygonValueKey ?? 'density'] ?? 0)
+            const intensity = Math.min(1, Math.sqrt(value) / 35)
+            return lerpColor(colorFromHex('#c2d7f5', 180), accent, intensity)
+          },
+          getLineColor: [12, 16, 12, 200],
+          lineWidthMinPixels: 1,
+          material: true,
+          onClick: (info: PickingInfo<{ properties?: { name?: string; density?: number } }>) => {
+            const name = info.object?.properties?.name
+            const region = name ? findRegion(name) : undefined
+            if (region) onSelectRegion(region)
+          },
+        }),
+      ]
+
+    case 'path': {
+      const maxPath = Math.max(...(dataset.paths?.map((path) => path.value) ?? [1]))
+      return [
+        new PathLayer<PathMetric>({
+          id: `path-${dataset.id}`,
+          data: dataset.paths ?? [],
+          getPath: (path) => path.path,
+          getColor: (path) => lerpColor(colorFromHex('#90b4e8', 180), accent, path.value / maxPath),
+          getWidth: (path) => 2 + (path.value / maxPath) * 8,
+          widthMinPixels: 2,
+          widthMaxPixels: 14,
+          pickable: true,
+          rounded: true,
+          onClick: (info: PickingInfo<PathMetric>) => {
+            const region = findRegion(info.object?.id ?? '')
+            if (region) onSelectRegion(region)
+          },
+        }),
+        new TextLayer<PathMetric>({
+          id: `path-labels-${dataset.id}`,
+          data: dataset.paths ?? [],
+          getPosition: (path) => path.path[Math.floor(path.path.length / 2)],
+          getText: (path) => path.name,
+          getSize: 12,
+          getColor: [245, 247, 238, 230],
+          getTextAnchor: 'middle',
+          outlineWidth: 2,
+          outlineColor: [12, 16, 12, 220],
+        }),
+      ]
+    }
+
+    case 'line': {
+      const maxLine = Math.max(...(dataset.lines?.map((line) => line.value) ?? [1]))
+      return [
+        new LineLayer<LineSegment>({
+          id: `line-${dataset.id}`,
+          data: dataset.lines ?? [],
+          getSourcePosition: (line) => line.source,
+          getTargetPosition: (line) => line.target,
+          getColor: (line) => lerpColor(colorFromHex('#4a3a70', 160), accent, line.value / maxLine),
+          getWidth: (line) => 1 + (line.value / maxLine) * 6,
+          widthMinPixels: 1,
+          pickable: true,
+          onClick: (info: PickingInfo<LineSegment>) => {
+            const region = dataset.regions.find((item) =>
+              info.object?.name.toLowerCase().includes(item.name.split(' ')[0].toLowerCase()),
             )
-          })}
-        </div>
-      </section>
+            if (region) onSelectRegion(region)
+          },
+        }),
+        new ScatterplotLayer<RegionMetric>({
+          id: `line-hubs-${dataset.id}`,
+          data: dataset.regions,
+          pickable: true,
+          getPosition: (region) => region.coordinates,
+          getRadius: 22_000,
+          radiusMinPixels: 5,
+          getFillColor: (region) => (selectedRegionId === region.id ? [255, 255, 255, 245] : accent),
+          onClick: (info: PickingInfo<RegionMetric>) => {
+            if (info.object) onSelectRegion(info.object)
+          },
+        }),
+      ]
+    }
 
-      <section className="featured-section">
-        <div className="featured-visual">
-          <div className="featured-map-lines" />
-          <span className="map-town town-one">WATERLOO</span>
-          <span className="map-town town-two">PLANCENOIT</span>
-          <span className="featured-unit allied"><span>III</span></span>
-          <span className="featured-unit french"><span>I</span></span>
-          <span className="featured-path" />
-          <button className="round-play" onClick={() => navigate('/battles/waterloo')} aria-label="Replay Waterloo"><Play fill="currentColor" size={20} /></button>
-        </div>
-        <div className="featured-copy">
-          <div className="section-kicker light">FEATURED EXPEDITION</div>
-          <span className="featured-era">EUROPE · 1815</span>
-          <h2>{featured.title}</h2>
-          <p>One final gamble. Three armies. A rain-soaked field that would decide the fate of Europe.</p>
-          <div className="featured-facts">
-            <span><small>DATE</small><b>18 June 1815</b></span>
-            <span><small>LOCATION</small><b>Waterloo, Belgium</b></span>
-            <span><small>OUTCOME</small><b>Coalition victory</b></span>
-          </div>
-          <button className="text-button light" onClick={() => navigate('/battles/waterloo')}>Enter the battlefield <ArrowRight size={16} /></button>
-        </div>
-      </section>
-
-      <section className="archive-section" id="archive">
-        <div className="archive-heading">
-          <div><div className="section-kicker">BROWSE THE ATLAS</div><h2>Choose an expedition</h2></div>
-          <div className="filters" role="group" aria-label="Filter battles">
-            {(['All', ...Object.keys(categoryMeta)] as Array<BattleCategory | 'All'>).map((item) => (
-              <button className={category === item ? 'active' : ''} key={item} onClick={() => setCategory(item)}>
-                {item === 'Science Fiction' ? 'Sci-Fi' : item}
-              </button>
-            ))}
-          </div>
-        </div>
-        <div className="battle-list">
-          {filtered.map((battle, index) => (
-            <button className={`battle-row ${battle.available ? 'available' : ''}`} key={battle.title} onClick={() => selectBattle(battle.available, battle.title)}>
-              <span className="battle-index">{String(index + 1).padStart(2, '0')}</span>
-              <span className="battle-name"><strong>{battle.title}</strong><small>{battle.location}</small></span>
-              <span className="battle-category">{battle.category}</span>
-              <span className="battle-year">{battle.year}</span>
-              <span className="battle-status">{battle.available ? 'EXPLORE' : 'COMING SOON'} <ArrowRight size={15} /></span>
-            </button>
-          ))}
-        </div>
-      </section>
-      <footer>
-        <Brand compact />
-        <p>Explore the moments that changed everything.</p>
-        <span>© 2026 BATTLE ATLAS</span>
-      </footer>
-      {notice && <div className="toast" role="status">{notice}</div>}
-    </main>
-  )
-}
-
-function interpolateUnit(unit: Unit, progress: number): Position {
-  const nextIndex = unit.path.findIndex((point) => point.at >= progress)
-  if (nextIndex <= 0) return unit.path[0]
-  const next = unit.path[nextIndex]
-  const previous = unit.path[nextIndex - 1]
-  const local = (progress - previous.at) / Math.max(1, next.at - previous.at)
-  return {
-    x: previous.x + (next.x - previous.x) * local,
-    y: previous.y + (next.y - previous.y) * local,
+    default:
+      return []
   }
 }
 
-function TacticalMap({ progress, selectedUnit, onSelectUnit }: { progress: number; selectedUnit: string | null; onSelectUnit: (id: string | null) => void }) {
-  const [zoom, setZoom] = useState(1)
-  const currentEvent = [...waterloo.events].reverse().find((event) => event.at <= progress)
+type AppPage = 'atlas' | 'about' | 'contact' | 'datasets' | 'dataset'
 
+function Brand() {
   return (
-    <div className="tactical-map" onClick={() => onSelectUnit(null)}>
-      <div className="terrain" style={{ transform: `scale(${zoom})` }}>
-        <svg className="map-svg" viewBox="0 0 1000 680" preserveAspectRatio="none" aria-hidden="true">
-          <defs>
-            <pattern id="grain" width="9" height="9" patternUnits="userSpaceOnUse">
-              <circle cx="2" cy="2" r=".7" fill="#1d211b" opacity=".2" />
-            </pattern>
-          </defs>
-          <path className="forest" d="M0 70 Q170 10 294 95 T530 80 Q750 -5 1000 95 L1000 0 L0 0Z" />
-          <path className="forest forest-two" d="M760 680 Q790 530 1000 490 L1000 680Z" />
-          <path className="ridge" d="M30 245 C220 180 350 230 520 197 S800 220 990 150" />
-          <path className="road" d="M438 700 C450 590 430 510 466 420 S445 245 475 -20" />
-          <path className="road minor" d="M1000 565 C770 550 625 500 475 427 S230 380 -10 410" />
-          <path className="stream" d="M830 690 C770 580 820 500 730 422 S680 250 720 -10" />
-          <path className="contour-path" d="M-20 150 C170 80 250 160 410 114 S730 120 1020 48" />
-          <path className="contour-path" d="M-20 194 C160 125 282 204 430 157 S760 162 1020 88" />
-          <path className="contour-path" d="M-20 540 C210 470 290 560 490 510 S800 525 1020 420" />
-          <path className="contour-path" d="M-20 588 C220 515 310 610 520 558 S820 570 1020 470" />
-          <rect width="1000" height="680" fill="url(#grain)" />
-        </svg>
-        <span className="place-label waterloo-label">WATERLOO <small>3 KM</small></span>
-        <span className="place-label mont-label">MONT-ST-JEAN</span>
-        <span className="place-label belle-label">LA BELLE ALLIANCE</span>
-        <span className="place-label plan-label">PLANCENOIT</span>
-        <span className="place-label houg-label">HOUGOUMONT</span>
-        <span className="farm farm-a" aria-hidden="true">▰</span>
-        <span className="farm farm-b" aria-hidden="true">▰</span>
-        {waterloo.units.map((unit) => {
-          const point = interpolateUnit(unit, progress)
-          const isSelected = selectedUnit === unit.id
-          return (
-            <button
-              key={unit.id}
-              className={`map-unit ${unit.side} ${isSelected ? 'selected' : ''}`}
-              style={{ left: `${point.x}%`, top: `${point.y}%` }}
-              onClick={(event) => { event.stopPropagation(); onSelectUnit(unit.id) }}
-              aria-label={`${unit.name}, ${unit.strength} troops`}
-            >
-              <span className="unit-symbol">{unit.side === 'allied' ? '×' : '•'}</span>
-              <span className="unit-name">{unit.name}</span>
-              {isSelected && <span className="unit-tooltip"><b>{unit.name}</b><small>Estimated strength · {unit.strength}</small></span>}
-            </button>
-          )
-        })}
-        {currentEvent && Math.abs(progress - currentEvent.at) < 7 && (
-          <span className="event-pulse" style={{ left: `${currentEvent.position.x}%`, top: `${currentEvent.position.y}%` }} />
-        )}
-      </div>
-      <div className="map-tools">
-        <button onClick={() => setZoom((value) => Math.min(1.5, value + .1))} aria-label="Zoom in"><Plus size={17} /></button>
-        <button onClick={() => setZoom((value) => Math.max(1, value - .1))} aria-label="Zoom out"><Minus size={17} /></button>
-        <button onClick={() => setZoom(1)} aria-label="Reset map"><Crosshair size={17} /></button>
-      </div>
-      <div className="map-legend">
-        <span><i className="allied-dot" /> COALITION</span>
-        <span><i className="french-dot" /> FRENCH EMPIRE</span>
-      </div>
-      <div className="map-scale">0 <span /> 1 KM</div>
+    <div className="brand">
+      <span className="brand-orbit"><Globe2 size={21} /></span>
+      <span>MAPS<b>TOIT</b></span>
+      <small>DECK.GL</small>
     </div>
   )
 }
 
-function Timeline({ progress, playing, onProgress, onToggle }: { progress: number; playing: boolean; onProgress: (value: number) => void; onToggle: () => void }) {
-  const event = [...waterloo.events].reverse().find((item) => item.at <= progress) ?? waterloo.events[0]
-  const minutes = Math.round(690 + progress * 5.4)
-  const time = `${String(Math.floor(minutes / 60)).padStart(2, '0')}:${String(minutes % 60).padStart(2, '0')}`
-
+function DatasetPage({
+  dataset,
+  onBack,
+  onViewMap,
+}: {
+  dataset: AtlasDataset
+  onBack: () => void
+  onViewMap: () => void
+}) {
   return (
-    <div className="timeline">
-      <button className="timeline-play" onClick={onToggle} aria-label={playing ? 'Pause replay' : 'Play replay'}>
-        {playing ? <Pause size={18} fill="currentColor" /> : <Play size={18} fill="currentColor" />}
-      </button>
-      <div className="time-readout"><b>{time}</b><small>18 JUN 1815</small></div>
-      <div className="timeline-track-wrap">
-        <input type="range" min="0" max="100" step=".1" value={progress} onChange={(e) => onProgress(Number(e.target.value))} aria-label="Battle timeline" />
-        <div className="timeline-events" aria-hidden="true">
-          {waterloo.events.map((item) => <i key={item.id} className={progress >= item.at ? 'passed' : ''} style={{ left: `${item.at}%` }} />)}
+    <article className="content-page dataset-detail-page" style={{ '--accent': dataset.accent } as React.CSSProperties}>
+      <button className="world-back" onClick={onBack}><ArrowLeft size={15} /> All datasets</button>
+      <span className="panel-kicker">{dataset.category} · {dataset.countryCode}</span>
+      <h1>{dataset.title}</h1>
+      <p className="page-lead">{dataset.summary}</p>
+
+      <div className="dataset-meta">
+        <div>
+          <small>Country</small>
+          <strong>{dataset.country}</strong>
         </div>
-        <div className="timeline-labels"><span>11:30</span><span>14:00</span><span>16:30</span><span>18:30</span><span>20:30</span></div>
-      </div>
-      <div className="current-event"><span>NOW</span><b>{event.title}</b></div>
-    </div>
-  )
-}
-
-function BattlePage() {
-  const [progress, setProgress] = useState(0)
-  const [playing, setPlaying] = useState(false)
-  const [selectedUnit, setSelectedUnit] = useState<string | null>(null)
-  const [panel, setPanel] = useState<'story' | 'forces'>('story')
-  const [sidebarOpen, setSidebarOpen] = useState(true)
-  const frame = useRef<number | null>(null)
-  const lastTime = useRef<number | null>(null)
-
-  useEffect(() => {
-    if (!playing) return
-    function tick(timestamp: number) {
-      if (lastTime.current !== null) {
-        const delta = timestamp - lastTime.current
-        setProgress((value) => {
-          const next = value + delta / 900
-          if (next >= 100) {
-            setPlaying(false)
-            return 100
-          }
-          return next
-        })
-      }
-      lastTime.current = timestamp
-      frame.current = requestAnimationFrame(tick)
-    }
-    frame.current = requestAnimationFrame(tick)
-    return () => {
-      if (frame.current) cancelAnimationFrame(frame.current)
-      lastTime.current = null
-    }
-  }, [playing])
-
-  const currentEvent = useMemo(
-    () => [...waterloo.events].reverse().find((event) => event.at <= progress) ?? waterloo.events[0],
-    [progress],
-  )
-
-  return (
-    <main className="battle-page">
-      <div className="battle-topbar">
-        <Brand compact />
-        <button className="back-link" onClick={() => navigate('/')}><ArrowLeft size={15} /> Back to atlas</button>
-        <div className="battle-title-mini"><span>HISTORICAL · 1815</span><b>Waterloo</b></div>
-        <div className="top-actions">
-          <button aria-label="Map layers"><Layers3 size={18} /></button>
-          <button aria-label="About this visualization"><CircleHelp size={18} /></button>
-          <button aria-label="Full screen" onClick={() => document.documentElement.requestFullscreen?.()}><Expand size={18} /></button>
+        <div>
+          <small>Metric</small>
+          <strong>{dataset.metric}</strong>
+        </div>
+        <div>
+          <small>Layer</small>
+          <strong>{layerLabels[dataset.mapLayer].split(' · ')[0]}</strong>
+        </div>
+        <div>
+          <small>Source</small>
+          <strong>{dataset.sourceLabel}</strong>
         </div>
       </div>
-      <div className="battle-workspace">
-        <aside className={`battle-sidebar ${sidebarOpen ? '' : 'closed'}`}>
-          <button className="sidebar-toggle" onClick={() => setSidebarOpen(!sidebarOpen)} aria-label="Toggle battle details">
-            {sidebarOpen ? <ArrowLeft size={15} /> : <ArrowRight size={15} />}
-          </button>
-          <div className="sidebar-scroll">
-            <div className="battle-tag"><Flag size={14} /> EXPEDITION 001</div>
-            <h1>Waterloo</h1>
-            <p className="battle-deck">{waterloo.summary}</p>
-            <div className="panel-tabs">
-              <button className={panel === 'story' ? 'active' : ''} onClick={() => setPanel('story')}>Story</button>
-              <button className={panel === 'forces' ? 'active' : ''} onClick={() => setPanel('forces')}>Forces</button>
-            </div>
-            {panel === 'story' ? (
-              <>
-                <div className="event-card">
-                  <span className="event-time">{currentEvent.time} · CURRENT EVENT</span>
-                  <h2>{currentEvent.title}</h2>
-                  <p>{currentEvent.description}</p>
-                </div>
-                <div className="event-list">
-                  {waterloo.events.map((event) => (
-                    <button key={event.id} className={Math.abs(event.at - currentEvent.at) < 1 ? 'active' : ''} onClick={() => { setProgress(event.at); setPlaying(false) }}>
-                      <span>{event.time}</span><b>{event.title}</b>
-                    </button>
-                  ))}
-                </div>
-              </>
-            ) : (
-              <div className="forces-panel">
-                <h3><Users size={16} /> Commanders</h3>
-                {waterloo.commanders.map((commander) => (
-                  <div className="commander" key={commander.name}>
-                    <span className={commander.side}>{commander.monogram}</span>
-                    <p><b>{commander.name}</b><small>{commander.role}</small></p>
-                  </div>
-                ))}
-                <h3><Swords size={16} /> Strength</h3>
-                <p className="force-stat">{waterloo.forces}</p>
-              </div>
-            )}
-            <div className="impact-card">
-              <BookOpen size={18} />
-              <span><small>HISTORICAL IMPACT</small><b>Napoleon's final defeat ended twenty-three years of near-continuous war in Europe.</b></span>
-            </div>
-          </div>
-        </aside>
-        <section className="map-area">
-          <TacticalMap progress={progress} selectedUnit={selectedUnit} onSelectUnit={setSelectedUnit} />
-          <Timeline
-            progress={progress}
-            playing={playing}
-            onProgress={(value) => { setProgress(value); setPlaying(false) }}
-            onToggle={() => {
-              if (progress >= 100) setProgress(0)
-              setPlaying((value) => !value)
-            }}
-          />
-          <button className="restart-button" onClick={() => { setProgress(0); setPlaying(false) }}><RotateCcw size={14} /> Restart</button>
+
+      <div className="page-grid dataset-info-grid">
+        <section>
+          <small>01 · WHAT IT IS</small>
+          <h2>{dataset.eyebrow}</h2>
+          <p>{dataset.summary}</p>
+        </section>
+        <section>
+          <small>02 · WHERE IT COMES FROM</small>
+          <h2>Data source</h2>
+          <p>{dataset.sourceLabel}. Values are shown as {dataset.unit}.</p>
+          <a href={dataset.sourceUrl} target="_blank" rel="noreferrer">
+            Open source <ExternalLink size={13} />
+          </a>
+        </section>
+        <section>
+          <small>03 · WHERE IT MAPS</small>
+          <h2>{dataset.country}</h2>
+          <p>
+            Coverage is {dataset.country} ({dataset.countryCode}), across {dataset.regions.length} mapped regions
+            using a {layerLabels[dataset.mapLayer]}.
+          </p>
+          <a href={dataset.exampleReference} target="_blank" rel="noreferrer">
+            deck.gl example <ExternalLink size={13} />
+          </a>
         </section>
       </div>
-    </main>
+
+      <button className="primary-cta" onClick={onViewMap}>
+        View on map <ArrowUpRight size={16} />
+      </button>
+    </article>
+  )
+}
+
+function RegionDrawer({
+  dataset,
+  region,
+  onClose,
+}: {
+  dataset: AtlasDataset
+  region: RegionMetric
+  onClose: () => void
+}) {
+  const rank = dataset.regions.findIndex((item) => item.id === region.id) + 1
+  const max = Math.max(...dataset.regions.map((item) => Math.abs(item.perCapita)), 1)
+
+  return (
+    <aside className="fact-drawer" style={{ '--accent': dataset.accent } as React.CSSProperties}>
+      <button className="drawer-close" onClick={onClose} aria-label="Close region"><X size={18} /></button>
+      <div className="fact-category">{dataset.category} · #{rank} of {dataset.regions.length}</div>
+      <div className="fact-index">{dataset.countryCode} / {region.id.toUpperCase()}</div>
+      <div className="deck-badge">{layerLabels[dataset.mapLayer].toUpperCase()}</div>
+      <p className="fact-eyebrow">{dataset.eyebrow}</p>
+      <h2>{region.name}</h2>
+      <p className="fact-summary">
+        {dataset.summary}
+      </p>
+
+      <div className="metric-grid">
+        <div>
+          <small>METRIC</small>
+          <strong>{formatMetric(region.perCapita)}</strong>
+          <span>{dataset.unit}</span>
+        </div>
+        <div>
+          <small>POPULATION</small>
+          <strong>{formatNumber(region.population)}</strong>
+          <span>context</span>
+        </div>
+        <div>
+          <small>RAW</small>
+          <strong>{formatNumber(region.rawValue)}</strong>
+          <span>{dataset.metric}</span>
+        </div>
+      </div>
+
+      <div className="bar-viz">
+        <div className="bar-row">
+          <div><span>This region</span><b>{formatMetric(region.perCapita)}</b></div>
+          <i style={{ width: `${Math.max(6, (Math.abs(region.perCapita) / max) * 100)}%`, background: dataset.accent }} />
+        </div>
+        <div className="bar-row">
+          <div><span>Dataset peak ({dataset.regions[0].name})</span><b>{formatMetric(dataset.regions[0].perCapita)}</b></div>
+          <i style={{ width: '100%', background: '#e8e5dc' }} />
+        </div>
+      </div>
+
+      <a href={dataset.exampleReference} target="_blank" rel="noreferrer">
+        deck.gl example <ExternalLink size={13} />
+      </a>
+      <a href={dataset.sourceUrl} target="_blank" rel="noreferrer">
+        Source: {dataset.sourceLabel} <ExternalLink size={13} />
+      </a>
+    </aside>
   )
 }
 
 function App() {
-  const [path, setPath] = useState(window.location.pathname)
+  const mapContainer = useRef<HTMLDivElement>(null)
+  const mapRef = useRef<MapLibreMap | null>(null)
+  const deckOverlayRef = useRef<MapboxOverlay | null>(null)
+  const [mapReady, setMapReady] = useState(false)
+  const [selectedCountry, setSelectedCountry] = useState<string | null>(null)
+  const [selectedCountryCode, setSelectedCountryCode] = useState<string | null>(null)
+  const [activeDatasetId, setActiveDatasetId] = useState<string | null>(null)
+  const [selectedRegion, setSelectedRegion] = useState<RegionMetric | null>(null)
+  const [category, setCategory] = useState<DatasetCategory | 'All'>('All')
+  const [query, setQuery] = useState('')
+  const [page, setPage] = useState<AppPage>('atlas')
+  const [viewingDatasetId, setViewingDatasetId] = useState<string | null>(null)
+  const [allCountries, setAllCountries] = useState<string[]>(availableCountries)
+  const [countryCodes, setCountryCodes] = useState<Record<string, string>>({})
+  const [capitals, setCapitals] = useState<Record<string, CapitalRecord>>({})
+
+  const countryDatasets = useMemo(() => {
+    if (!selectedCountry) return []
+    return datasetsForCountry(selectedCountry).filter(
+      (dataset) => category === 'All' || dataset.category === category,
+    )
+  }, [selectedCountry, category])
+
+  const catalogDatasets = useMemo(
+    () => datasets.filter((dataset) => category === 'All' || dataset.category === category),
+    [category],
+  )
+
+  const activeDataset = useMemo(
+    () => countryDatasets.find((dataset) => dataset.id === activeDatasetId) ?? countryDatasets[0] ?? null,
+    [countryDatasets, activeDatasetId],
+  )
+
+  const viewingDataset = useMemo(
+    () => datasets.find((dataset) => dataset.id === viewingDatasetId) ?? null,
+    [viewingDatasetId],
+  )
+
+  const showMap = page === 'atlas'
+
+  const searchResults = useMemo(() => {
+    if (!query.trim()) return []
+    const normalized = query.toLowerCase()
+    return allCountries.filter((country) => country.toLowerCase().includes(normalized)).slice(0, 8)
+  }, [query, allCountries])
+
+  const selectedCapital = selectedCountryCode ? capitals[selectedCountryCode] : undefined
+
+  function openDatasetPage(datasetId: string) {
+    setViewingDatasetId(datasetId)
+    setPage('dataset')
+  }
+
+  function openDatasetsIndex() {
+    setViewingDatasetId(null)
+    setPage('datasets')
+  }
+
+  function focusCountry(country: string, countryCode?: string, preferredDatasetId?: string) {
+    const resolvedCode = countryCode
+      ?? countryCodes[country]
+      ?? datasets.find((dataset) => dataset.country === country)?.countryCode
+      ?? null
+    const nextDatasets = datasetsForCountry(country)
+    const preferred = preferredDatasetId
+      ? nextDatasets.find((dataset) => dataset.id === preferredDatasetId)
+      : undefined
+    const nextDataset = preferred ?? nextDatasets[0] ?? null
+    setSelectedCountry(country)
+    setSelectedCountryCode(resolvedCode)
+    setActiveDatasetId(nextDataset?.id ?? null)
+    setSelectedRegion(null)
+    setQuery('')
+    setPage('atlas')
+    setViewingDatasetId(null)
+
+    if (!mapRef.current) return
+    if (nextDataset) {
+      fitDataset(mapRef.current, nextDataset)
+      return
+    }
+
+    const countryFeature = mapRef.current
+      .querySourceFeatures('countries')
+      .find((feature) => feature.properties?.name === country)
+    if (countryFeature?.geometry && 'coordinates' in countryFeature.geometry) {
+      const bounds = new maplibregl.LngLatBounds()
+      extendBounds(bounds, countryFeature.geometry.coordinates)
+      if (!bounds.isEmpty()) {
+        mapRef.current.fitBounds(bounds, { padding: 120, maxZoom: 5, duration: 1400, pitch: 0, bearing: 0 })
+      }
+    }
+  }
+
+  function resetWorld() {
+    setSelectedCountry(null)
+    setSelectedCountryCode(null)
+    setActiveDatasetId(null)
+    setSelectedRegion(null)
+    mapRef.current?.flyTo({ center: [8, 18], zoom: 1.7, pitch: 0, bearing: 0, duration: 1400 })
+  }
+
+  function viewDatasetOnMap(dataset: AtlasDataset) {
+    focusCountry(dataset.country, dataset.countryCode, dataset.id)
+  }
+
   useEffect(() => {
-    const updatePath = () => setPath(window.location.pathname)
-    window.addEventListener('popstate', updatePath)
-    return () => window.removeEventListener('popstate', updatePath)
+    if (!mapContainer.current || mapRef.current) return
+    const map = new maplibregl.Map({
+      container: mapContainer.current,
+      style: 'https://demotiles.maplibre.org/style.json',
+      center: [8, 18],
+      zoom: 1.7,
+      minZoom: 1.2,
+      maxZoom: 10,
+      attributionControl: false,
+    })
+    mapRef.current = map
+    map.addControl(new maplibregl.NavigationControl({ showCompass: false }), 'bottom-right')
+    map.addControl(new maplibregl.AttributionControl({ compact: true }), 'bottom-right')
+    const deckOverlay = new MapboxOverlay({ interleaved: false, layers: [] })
+    map.addControl(deckOverlay as unknown as maplibregl.IControl)
+    deckOverlayRef.current = deckOverlay
+
+    map.on('style.load', () => {
+      map.setProjection({ type: 'mercator' })
+    })
+
+    map.on('load', () => {
+      map.addSource('countries', { type: 'geojson', data: COUNTRIES_URL })
+      map.addLayer({
+        id: 'available-countries',
+        type: 'fill',
+        source: 'countries',
+        filter: ['match', ['get', 'name'], availableCountries, true, false],
+        paint: { 'fill-color': '#1a73e8', 'fill-opacity': 0.18 },
+      })
+      map.addLayer({
+        id: 'country-borders',
+        type: 'line',
+        source: 'countries',
+        paint: { 'line-color': '#6b8cae', 'line-opacity': 0.45, 'line-width': 0.7 },
+      })
+      map.addLayer({
+        id: 'countries-hit',
+        type: 'fill',
+        source: 'countries',
+        paint: { 'fill-color': '#000000', 'fill-opacity': 0 },
+      })
+      map.addLayer({
+        id: 'country-hover',
+        type: 'fill',
+        source: 'countries',
+        filter: ['==', ['get', 'name'], ''],
+        paint: { 'fill-color': '#1a73e8', 'fill-opacity': 0.16 },
+      })
+      map.addLayer({
+        id: 'country-selected',
+        type: 'fill',
+        source: 'countries',
+        filter: ['==', ['get', 'name'], ''],
+        paint: {
+          'fill-color': '#1a73e8',
+          'fill-opacity': 0.24,
+          'fill-outline-color': '#174ea6',
+        },
+      })
+      map.addLayer({
+        id: 'country-selected-border',
+        type: 'line',
+        source: 'countries',
+        filter: ['==', ['get', 'name'], ''],
+        paint: {
+          'line-color': '#1a73e8',
+          'line-opacity': 0.95,
+          'line-width': 2.2,
+          'line-blur': 0.15,
+        },
+      })
+
+      map.on('click', 'countries-hit', (event: MapLayerMouseEvent) => {
+        const country = event.features?.[0]?.properties?.name as string | undefined
+        const code = event.features?.[0]?.properties?.['ISO3166-1-Alpha-2'] as string | undefined
+        if (country) focusCountry(country, code)
+      })
+      map.on('mousemove', 'countries-hit', (event: MapLayerMouseEvent) => {
+        const country = event.features?.[0]?.properties?.name as string | undefined
+        map.setFilter('country-hover', ['==', ['get', 'name'], country ?? ''])
+        map.getCanvas().style.cursor = 'pointer'
+      })
+      map.on('mouseleave', 'countries-hit', () => {
+        map.setFilter('country-hover', ['==', ['get', 'name'], ''])
+        map.getCanvas().style.cursor = ''
+      })
+      setMapReady(true)
+    })
+
+    fetch(COUNTRIES_URL)
+      .then((response) => response.json())
+      .then((collection: { features?: Array<{ properties?: { name?: string; 'ISO3166-1-Alpha-2'?: string } }> }) => {
+        const names = collection.features
+          ?.map((feature) => feature.properties?.name)
+          .filter((name): name is string => Boolean(name))
+          .sort((a, b) => a.localeCompare(b))
+        if (names?.length) setAllCountries(names)
+        const codes = Object.fromEntries(
+          collection.features
+            ?.filter((feature) => feature.properties?.name && feature.properties['ISO3166-1-Alpha-2'])
+            .map((feature) => [feature.properties!.name!, feature.properties!['ISO3166-1-Alpha-2']!]) ?? [],
+        )
+        setCountryCodes(codes)
+      })
+      .catch(() => undefined)
+
+    fetch('https://restcountries.com/v3.1/all?fields=cca2,capital,capitalInfo')
+      .then((response) => response.json())
+      .then((countries: Array<{ cca2?: string; capital?: string[]; capitalInfo?: { latlng?: [number, number] } }>) => {
+        const records: Record<string, CapitalRecord> = {}
+        countries.forEach((country) => {
+          const latlng = country.capitalInfo?.latlng
+          const name = country.capital?.[0]
+          if (country.cca2 && name && latlng) {
+            records[country.cca2] = { name, coordinates: [latlng[1], latlng[0]] }
+          }
+        })
+        setCapitals(records)
+      })
+      .catch(() => undefined)
+
+    return () => {
+      deckOverlayRef.current = null
+      map.remove()
+      mapRef.current = null
+    }
   }, [])
-  return path.startsWith('/battles/waterloo') ? <BattlePage /> : <HomePage />
+
+  useEffect(() => {
+    if (!mapReady || !mapRef.current) return
+    mapRef.current.setFilter('country-selected', ['==', ['get', 'name'], selectedCountry ?? ''])
+    mapRef.current.setFilter('country-selected-border', ['==', ['get', 'name'], selectedCountry ?? ''])
+  }, [mapReady, selectedCountry])
+
+  useEffect(() => {
+    if (!mapReady || !deckOverlayRef.current) return
+    if (!activeDataset) {
+      deckOverlayRef.current.setProps({ layers: [] })
+      return
+    }
+    deckOverlayRef.current.setProps({
+      layers: deckLayersForDataset(activeDataset, selectedRegion?.id ?? null, (region) => {
+        setSelectedRegion(region)
+        mapRef.current?.easeTo({
+          center: region.coordinates,
+          zoom: Math.max(mapRef.current.getZoom(), 4.6),
+          duration: 700,
+        })
+      }),
+    })
+  }, [mapReady, activeDataset, selectedRegion])
+
+  useEffect(() => {
+    if (activeDataset && selectedRegion && !activeDataset.regions.some((region) => region.id === selectedRegion.id)) {
+      setSelectedRegion(null)
+    }
+  }, [activeDataset, selectedRegion])
+
+  useEffect(() => {
+    if (!mapReady || !mapRef.current) return
+    const map = mapRef.current
+    const frame = requestAnimationFrame(() => map.resize())
+    return () => cancelAnimationFrame(frame)
+  }, [mapReady, selectedCountry, activeDatasetId, category, page])
+
+  return (
+    <main className={`app-shell ${showMap ? '' : 'static-page'}`}>
+      <section className="data-section" aria-label="Serious data controls">
+        <header>
+          <button className="brand-button" onClick={() => setPage('atlas')} aria-label="Open atlas">
+            <Brand />
+          </button>
+          <div className="header-stat"><b>{datasets.length}</b><span>deck.gl<br />layer demos</span></div>
+          <nav className="site-nav" aria-label="Main navigation">
+            <button className={page === 'atlas' ? 'active' : ''} onClick={() => setPage('atlas')}>
+              <Layers size={14} /> Atlas
+            </button>
+            <button
+              className={page === 'datasets' || page === 'dataset' ? 'active' : ''}
+              onClick={openDatasetsIndex}
+            >
+              <Compass size={14} /> Datasets
+            </button>
+            <button className={page === 'about' ? 'active' : ''} onClick={() => setPage('about')}>
+              <Info size={14} /> About
+            </button>
+            <button className={page === 'contact' ? 'active' : ''} onClick={() => setPage('contact')}>
+              <Mail size={14} /> Contact
+            </button>
+          </nav>
+        </header>
+
+        {page === 'atlas' && (
+          <div className={`explorer-panel ${selectedCountry ? 'country-mode' : ''}`}>
+            {selectedCountry ? (
+              <>
+                <div className="explorer-intro">
+                  <button className="world-back" onClick={resetWorld}><ArrowLeft size={15} /> World view</button>
+                  <span className="panel-kicker">LAYER EXPLORER</span>
+                  <h1>{selectedCountry}</h1>
+                  {selectedCapital && (
+                    <div className="capital-pill"><LocateFixed size={13} /> Capital · {selectedCapital.name}</div>
+                  )}
+                  <p>
+                    {countryDatasets.length
+                      ? 'Open a dataset page for source details, or select one to render it on the map below.'
+                      : 'No layer demos published for this country yet.'}
+                  </p>
+                </div>
+
+                <div className="explorer-columns">
+                  <div className="fact-list">
+                    {countryDatasets.map((dataset) => (
+                      <div key={dataset.id} className={`dataset-row ${activeDataset?.id === dataset.id ? 'active' : ''}`}>
+                        <button
+                          className="dataset-select"
+                          onClick={() => {
+                            setActiveDatasetId(dataset.id)
+                            setSelectedRegion(null)
+                            if (mapRef.current) fitDataset(mapRef.current, dataset)
+                          }}
+                        >
+                          <i style={{ background: dataset.accent }}>{dataset.mapLayer.slice(0, 3).toUpperCase()}</i>
+                          <span>
+                            <small>{dataset.category} · {layerLabels[dataset.mapLayer].split(' · ')[0]}</small>
+                            <b>{dataset.title}</b>
+                          </span>
+                        </button>
+                        <button className="dataset-info" onClick={() => openDatasetPage(dataset.id)} aria-label={`About ${dataset.title}`}>
+                          <Info size={15} />
+                        </button>
+                      </div>
+                    ))}
+                    {!countryDatasets.length && (
+                      <div className="empty-state">No deck.gl layer demos here yet.</div>
+                    )}
+                  </div>
+
+                  {activeDataset && (
+                    <div className="leaderboard">
+                      <div className="leaderboard-head">
+                        <Layers size={14} /> {layerLabels[activeDataset.mapLayer]}
+                      </div>
+                      {activeDataset.regions.slice(0, 6).map((region, index) => (
+                        <button
+                          key={region.id}
+                          className={selectedRegion?.id === region.id ? 'active' : ''}
+                          onClick={() => {
+                            setSelectedRegion(region)
+                            mapRef.current?.easeTo({
+                              center: region.coordinates,
+                              zoom: Math.max(mapRef.current.getZoom(), 4.6),
+                              duration: 700,
+                            })
+                          }}
+                        >
+                          <span>{String(index + 1).padStart(2, '0')}</span>
+                          <b>{region.name}</b>
+                          <strong>{formatMetric(region.perCapita)}</strong>
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              </>
+            ) : (
+              <div className="explorer-intro world-intro">
+                <span className="panel-kicker"><Compass size={14} /> DECK.GL SHOWCASE LAYERS</span>
+                <h1>Serious data,<br /><em>six layers.</em></h1>
+                <p>
+                  Search a country below, or browse dataset pages for what each layer measures, where the numbers come from, and which country they cover.
+                </p>
+                <div className="explore-hint">
+                  <LocateFixed size={17} />
+                  <span><b>Start with the United States</b>Six datasets, one per deck.gl layer type</span>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
+        {page === 'datasets' && (
+          <article className="content-page datasets-index">
+            <span className="panel-kicker"><Compass size={14} /> DATASET CATALOG</span>
+            <h1>Every layer,<br /><em>explained.</em></h1>
+            <p className="page-lead">
+              Open a dataset page to see what it measures, which country it covers, and where the data comes from.
+            </p>
+            <nav className="category-dock catalog-filters" aria-label="Dataset categories">
+              <button className={category === 'All' ? 'active' : ''} onClick={() => setCategory('All')}>✦ <span>Everything</span></button>
+              {categories.map((item) => (
+                <button
+                  key={item.name}
+                  className={category === item.name ? 'active' : ''}
+                  onClick={() => setCategory(item.name)}
+                >
+                  {item.emoji} <span>{item.name}</span>
+                </button>
+              ))}
+            </nav>
+            <div className="dataset-catalog">
+              {catalogDatasets.map((dataset) => (
+                <button key={dataset.id} className="dataset-card" onClick={() => openDatasetPage(dataset.id)}>
+                  <i style={{ background: dataset.accent }} />
+                  <span>
+                    <small>{dataset.country} · {dataset.category}</small>
+                    <b>{dataset.title}</b>
+                    <em>{dataset.sourceLabel}</em>
+                  </span>
+                  <ChevronRight size={16} />
+                </button>
+              ))}
+              {!catalogDatasets.length && <div className="empty-state">No datasets in this category.</div>}
+            </div>
+          </article>
+        )}
+
+        {page === 'dataset' && viewingDataset && (
+          <DatasetPage
+            dataset={viewingDataset}
+            onBack={openDatasetsIndex}
+            onViewMap={() => viewDatasetOnMap(viewingDataset)}
+          />
+        )}
+
+        {page === 'about' && (
+          <article className="content-page">
+            <span className="panel-kicker"><Info size={14} /> ABOUT MAPSTOIT</span>
+            <h1>Geospatial data,<br /><em>made visible.</em></h1>
+            <p className="page-lead">
+              mapstoit is an interactive data atlas built to show how serious public datasets behave across different visualization layers.
+            </p>
+            <div className="page-grid">
+              <section>
+                <small>01 · THE IDEA</small>
+                <h2>One map, six visual languages</h2>
+                <p>Compare polygon density, origin–destination arcs, spatial aggregation, screen grids, highway paths, and flight corridors without changing tools.</p>
+              </section>
+              <section>
+                <small>02 · THE STACK</small>
+                <h2>MapLibre + deck.gl</h2>
+                <p>MapLibre provides the basemap while deck.gl renders fast, interactive WebGL layers over it. React and TypeScript power the interface.</p>
+              </section>
+              <section>
+                <small>03 · THE DATA</small>
+                <h2>Traceable public sources</h2>
+                <p>Each dataset page documents the metric, country coverage, and source so you can verify what you are looking at.</p>
+              </section>
+            </div>
+          </article>
+        )}
+
+        {page === 'contact' && (
+          <article className="content-page contact-page">
+            <span className="panel-kicker"><Mail size={14} /> CONTACT</span>
+            <h1>Let’s map<br /><em>something useful.</em></h1>
+            <p className="page-lead">
+              Found a data issue, have a dataset suggestion, or want to contribute a new country view? Open a discussion in the project repository.
+            </p>
+            <div className="contact-actions">
+              <a href="https://github.com/crumexhtx/animatedmapwebsite/issues/new" target="_blank" rel="noreferrer">
+                <span><b>Report or suggest</b><small>Open a GitHub issue</small></span>
+                <ArrowUpRight size={18} />
+              </a>
+              <a href="https://github.com/crumexhtx/animatedmapwebsite" target="_blank" rel="noreferrer">
+                <span><b>View the project</b><small>Source code and updates</small></span>
+                <ExternalLink size={18} />
+              </a>
+            </div>
+          </article>
+        )}
+
+        {showMap && (
+          <div className="controls-row map-controls">
+            <div className="search-box">
+              <Search size={17} />
+              <input
+                value={query}
+                onChange={(event) => setQuery(event.target.value)}
+                placeholder="Search a country…"
+                aria-label="Search countries"
+              />
+              {query && <button onClick={() => setQuery('')}><X size={14} /></button>}
+              {!!searchResults.length && (
+                <div className="search-results">
+                  {searchResults.map((country) => (
+                    <button key={country} onClick={() => focusCountry(country)}>
+                      {country}<ArrowUpRight size={14} />
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            <nav className="category-dock" aria-label="Dataset categories">
+              <button className={category === 'All' ? 'active' : ''} onClick={() => setCategory('All')}>✦ <span>Everything</span></button>
+              {categories.map((item) => (
+                <button
+                  key={item.name}
+                  className={category === item.name ? 'active' : ''}
+                  onClick={() => setCategory(item.name)}
+                >
+                  {item.emoji} <span>{item.name}</span>
+                </button>
+              ))}
+            </nav>
+          </div>
+        )}
+      </section>
+
+      <section className={`map-section ${showMap ? '' : 'is-hidden'}`} aria-label="Map visualization">
+        <div ref={mapContainer} className="world-map" />
+        {activeDataset ? (
+          <div className="map-caption dataset-caption">
+            <span className="pulse-dot" />
+            {activeDataset.title} · {layerLabels[activeDataset.mapLayer]}
+          </div>
+        ) : (
+          <div className="map-caption">
+            <span className="pulse-dot" /> Glowing countries have deck.gl layer demos
+          </div>
+        )}
+        {!mapReady && <div className="map-loader"><Globe2 size={30} /> Spinning up the planet…</div>}
+        {activeDataset && selectedRegion && (
+          <RegionDrawer
+            dataset={activeDataset}
+            region={selectedRegion}
+            onClose={() => setSelectedRegion(null)}
+          />
+        )}
+      </section>
+    </main>
+  )
 }
 
 createRoot(document.getElementById('root')!).render(
